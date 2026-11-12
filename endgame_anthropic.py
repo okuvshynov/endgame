@@ -4,6 +4,7 @@ import datetime
 import httpx
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pprint import pprint
 import random
 import secrets
@@ -19,6 +20,11 @@ DEFAULT_MODEL = "claude-opus-5-5"
 
 # default is 10 min. Bump to 2 hours for long thinking runs
 API_TIMEOUT  = 7200
+
+# Responses are streamed, so a healthy connection is never silent for long.
+# Give up on a read after this many seconds without any bytes (dead connection,
+# e.g. after the machine switches networks) so the retry logic can kick in.
+READ_TIMEOUT = 600
 
 # API calls per turn before giving up on the sample.
 N_ATTEMPTS_MAX = 3
@@ -355,6 +361,7 @@ def main():
     parser.add_argument("--n_tokens_max", type=int, default=2**16, help="max_tokens per request (up to 128000).")
     parser.add_argument("--api-key", help="Else uses ANTHROPIC_API_KEY / `ant auth login` profile.")
     parser.add_argument("--seed")
+    parser.add_argument("--jobs", "-j", type=int, default=1, help="Number of batches to run concurrently.")
     parser.add_argument("--no-fallbacks", action="store_true",
                         help="Disable server-side refusal fallbacks to another model.")
 
@@ -362,7 +369,7 @@ def main():
 
     if args.base_url is not None:
         print(f"I: base-url override: {args.base_url}")
-    client = anthropic.Anthropic(api_key=args.api_key, base_url=args.base_url, timeout=API_TIMEOUT, max_retries=0)
+    client = anthropic.Anthropic(api_key=args.api_key, base_url=args.base_url, timeout=httpx.Timeout(API_TIMEOUT, read=READ_TIMEOUT), max_retries=0)
 
     print(f"I: model: {args.model}")
 
@@ -379,14 +386,14 @@ def main():
         model_name = args.alias
     else:
         model_name = args.model
-    for i, batch in enumerate(batches):
-        print(f"Batch {i + 1}/{len(batches)}")
+    def process(i, batch):
+        tag = f"[{i + 1}/{len(batches)}]"
         samples = []
         paths = batch.split(",")
         for p in paths:
             with open(p, 'r') as file:
                 samples.append(json.load(file))
-                print(f"I: {p} : {samples[-1]['secret']}")
+                print(f"I: {tag} {p} : {samples[-1]['secret']}")
 
         res = run(client, samples, args)
 
@@ -400,12 +407,17 @@ def main():
             "result" : res,
         }
         content_str = json.dumps(content)
-        tag = secrets.token_hex(3)
         dt = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        with open(f"logs/{dt}-{tag}.json", "x") as fw:
+        with open(f"logs/{dt}-{secrets.token_hex(3)}.json", "x") as fw:
             fw.write(content_str)
 
-        print(f"Result: {res}")
+        print(f"Result: {tag} {res}")
+
+    # Batches are independent API calls, so run up to --jobs of them at once.
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        futures = [pool.submit(process, i, batch) for i, batch in enumerate(batches)]
+        for f in futures:
+            f.result()
 
 
 if __name__ == "__main__":
