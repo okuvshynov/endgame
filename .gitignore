@@ -2,3 +2,4 @@ evals/**
 tags
 *.swp
 logs/**
+**/__pycache__/**
