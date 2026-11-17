@@ -324,6 +324,7 @@ def run(client, samples, args):
 
     if len(calls) != 1:
         print(f"W: Expected one guess tool call per turn, got {len(calls)}")
+        res["error_log"] = save_error_response(response)
         return res
 
     try:
